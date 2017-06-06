@@ -17,6 +17,7 @@ const char* heatpump_topic              = "heatpump";
 const char* heatpump_set_topic          = "heatpump/set";
 const char* heatpump_status_topic       = "heatpump/status";
 const char* heatpump_timers_topic       = "heatpump/timers";
+const char* heatpump_external_temp_topic= "heatpump/externtemp";
 
 const char* heatpump_debug_topic        = "heatpump/debug";
 const char* heatpump_debug_set_topic    = "heatpump/debug/set";
@@ -27,3 +28,5 @@ const int blueLedPin = 2; // Onboard LED = digital pin 0 (blue LED on adafruit E
 
 // sketch settings
 const unsigned int SEND_ROOM_TEMP_INTERVAL_MS = 60000;
+const unsigned int EXTERNAL_TEMP_TIMEOUT = 60000;
+

@@ -16,7 +16,7 @@ WiFiClient espClient;
 PubSubClient mqtt_client(espClient);
 HeatPump hp;
 unsigned long lastTempSend;
-
+unsigned long lastExternalTempRecv;
 // debug mode, when true, will send all packets received from the heatpump to topic heatpump_debug_topic
 // this can also be set by sending "on" to heatpump_debug_set_topic
 bool _debugMode = true;
@@ -49,6 +49,7 @@ void setup() {
   hp.setPacketCallback(hpPacketDebug);
 
   #ifdef OTA
+    ArduinoOTA.setHostname(client_id);
     ArduinoOTA.begin();
   #endif
   
@@ -237,7 +238,25 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       _debugMode = false;
       mqtt_client.publish(heatpump_debug_topic, "debug mode disabled");
     }
-  } else {
+
+  } 
+  else if (strcmp(topic, heatpump_external_temp_topic) == 0)
+  {
+    const size_t bufferSize = JSON_OBJECT_SIZE(6);
+    DynamicJsonBuffer jsonBuffer(bufferSize);
+    JsonObject& root = jsonBuffer.parseObject(message);
+    if (!root.success()) {
+      mqtt_client.publish(heatpump_debug_topic, "!root.success(): invalid JSON on heatpump_extern_temp_topic...");
+      return;
+    }
+    if (root.containsKey("externalTemperature")) {
+      float externalTemperature = root["externalTemperature"];
+      hp.setRemoteTemperature(externalTemperature);
+      lastExternalTempRecv =  millis();
+    }   
+  }
+  
+  else {
     mqtt_client.publish(heatpump_debug_topic, strcat("heatpump: wrong mqtt topic: ", topic));
   }
 }
@@ -249,6 +268,7 @@ void mqttConnect() {
     if (mqtt_client.connect(client_id, mqtt_username, mqtt_password)) {
       mqtt_client.subscribe(heatpump_set_topic);
       mqtt_client.subscribe(heatpump_debug_set_topic);
+      mqtt_client.subscribe(heatpump_external_temp_topic);
     } else {
       // Wait 5 seconds before retrying
       delay(5000);
@@ -267,6 +287,11 @@ void loop() {
     hpStatusChanged(hp.getStatus());
     lastTempSend = millis();
   }
+  if (lastExternalTempRecv > 0 && millis() > (lastExternalTempRecv + EXTERNAL_TEMP_TIMEOUT)) { // we havent recieved an external temp in a while
+     hp.setRemoteTemperature(0);
+     lastExternalTempRecv = -1;
+  }
+
 
   mqtt_client.loop();
   
