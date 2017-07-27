@@ -77,6 +77,8 @@ HeatPump::HeatPump() {
   firstRun = true;
   tempMode = false;
   externalUpdate = false;
+  waitingForAck = false;
+    nextReq=false;
   currentStatus = {0, false, {TIMER_MODE_MAP[0], 0, 0, 0, 0}}; // initialise to all off, then it will update shortly after connect
 }
 
@@ -87,10 +89,8 @@ bool HeatPump::connect(HardwareSerial *serial) {
     _HardSerial = serial;
   }
   connected = false;
+    _HardSerial->end();
   _HardSerial->begin(2400, SERIAL_8E1);
-  if(onConnectCallback) {
-    onConnectCallback();
-  }
   
   // settle before we start sending packets
   delay(2000);
@@ -100,44 +100,50 @@ bool HeatPump::connect(HardwareSerial *serial) {
   memcpy(packet, CONNECT, CONNECT_LEN);
   //for(int count = 0; count < 2; count++) {
   writePacket(packet, CONNECT_LEN);
+    delay(1100);
   int packetType = readPacket();
   return packetType == RCVD_PKT_CONNECT_SUCCESS;
   //}
 }
 
-bool HeatPump::update() {
-  while(!canSend(false)) { delay(10); }
 
-  byte packet[PACKET_LEN] = {};
-  createPacket(packet, wantedSettings);
-  writePacket(packet, PACKET_LEN);
-  
-  int packetType = readPacket();
-  
-  if(packetType == RCVD_PKT_UPDATE_SUCCESS) {
-    // call sync() to get the latest settings from the heatpump, which should now have the updated settings
-    sync(RQST_PKT_SETTINGS);
 
-    return true;
-  } else {
-    return false;
-  }
-}
-
-void HeatPump::sync(byte packetType) {
+void HeatPump::sync() {
   if((!connected) || (millis() - (PACKET_SENT_INTERVAL_MS * 10) > lastRecv)) {
     connect(NULL);
   }
-  else if(autoUpdate && !firstRun && wantedSettings != currentSettings && packetType == PACKET_TYPE_DEFAULT) {
-     update(); 
-  }
-  else if(canSend(true)) {
+  if (canSend() && !waitingForAck){
     byte packet[PACKET_LEN] = {};
-    createInfoPacket(packet, packetType);
-    writePacket(packet, PACKET_LEN);
+    if(nextReq){
+          createInfoPacket(packet, RQST_PKT_SETTINGS);
+          writePacket(packet, PACKET_LEN);
+          nextReq = false;
+          waitingForAck = true;
+      }
+    else if(autoUpdate && !firstRun && wantedSettings != currentSettings) {
+        createPacket(packet, wantedSettings);
+        writePacket(packet, PACKET_LEN);
+        nextReq = true;
+        waitingForAck = true;
+        
+    }
+    else if(tempToSend){
+        createTempPacket(packet, tempToSend);
+        writePacket(packet, PACKET_LEN);
+        tempToSend = 0;
+        waitingForAck = true;
+    }
+    else {
+        createInfoPacket(packet, PACKET_TYPE_DEFAULT);
+        writePacket(packet, PACKET_LEN);
+        waitingForAck = true;
+    }
   }
-
-  readPacket(); 
+  readPacket();
+    if (waitingForAck && (millis() - (PACKET_SENT_INTERVAL_MS * 5) > lastRecv)){
+        waitingForAck = false;
+        connected = false;
+    }
 }
 
 void HeatPump::enableExternalUpdate() {
@@ -189,13 +195,13 @@ void HeatPump::setModeSetting(String setting) {
   wantedSettings.mode = lookupByteMapIndex(MODE_MAP, 5, setting) > -1 ? setting : MODE_MAP[0];
 }
 
-float HeatPump::getTemperature() {
+int HeatPump::getTemperature() {
   return currentSettings.temperature;
 }
 
 void HeatPump::setTemperature(float setting) {
   if(!tempMode){
-    wantedSettings.temperature = lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) > -1 ? setting : TEMP_MAP[0];
+    wantedSettings.temperature = lookupByteMapIndex(TEMP_MAP, 16, setting) > -1 ? setting : TEMP_MAP[0];
   }
   else {
     setting = setting * 2;
@@ -206,31 +212,9 @@ void HeatPump::setTemperature(float setting) {
 }
 
 void HeatPump::setRemoteTemperature(float setting) {
-  byte packet[PACKET_LEN] = {};
-  for (int i = 0; i < 21; i++) {
-    packet[i] = 0x00;
-  } 
-  for (int i = 0; i < HEADER_LEN; i++) {
-    packet[i] = HEADER[i];
-  }
-  packet[5] = 0x07;
-  if(setting > 0) {
-    packet[6] = 0x01;
-    setting = setting * 2;
-    setting = round(setting);
-    setting = setting / 2;
-    float temp = (setting * 2) + 128;
-    packet[8] = (int)temp;
-  }
-  else {
-    packet[6] = 0x00;
-    packet[8] = 0x80; //MHK1 send 80, even though it could be 00, since ControlByte is 00
-  } 
-  // add the checksum
-  byte chkSum = checkSum(packet, 21);
-  packet[21] = chkSum;
-  while(!canSend(false)) { delay(10); }
-  writePacket(packet, PACKET_LEN);
+    if (setting ==0)
+        tempToSend = -1;
+    else tempToSend = setting;
 }
 
 String HeatPump::getFanSpeed() {
@@ -273,18 +257,14 @@ bool HeatPump::getOperating() {
   return currentStatus.operating;
 }
 
-float HeatPump::FahrenheitToCelsius(int tempF) {
-  float temp = (tempF - 32) / 1.8;                
-  return ((float)round(temp*2))/2;                 //Round to nearest 0.5C
+unsigned int HeatPump::FahrenheitToCelsius(unsigned int tempF) {
+  double temp = (tempF - 32) / 1.8;                //round up if heat, down if cool or any other mode
+  return currentSettings.mode == MODE_MAP[0] ? ceil(temp) : floor(temp);
 }
 
-int HeatPump::CelsiusToFahrenheit(float tempC) {
-  float temp = (tempC * 1.8) + 32;                //round up if heat, down if cool or any other mode
-  return (int)(temp + 0.5);
-}
-
-void HeatPump::setOnConnectCallback(ON_CONNECT_CALLBACK_SIGNATURE) {
-  this->onConnectCallback = onConnectCallback;
+unsigned int HeatPump::CelsiusToFahrenheit(unsigned int tempC) {
+  double temp = (tempC * 1.8) + 32;                //round up if heat, down if cool or any other mode
+  return currentSettings.mode == MODE_MAP[0] ? ceil(temp) : floor(temp);
 }
 
 void HeatPump::setSettingsChangedCallback(SETTINGS_CHANGED_CALLBACK_SIGNATURE) {
@@ -305,7 +285,7 @@ void HeatPump::setRoomTempChangedCallback(ROOM_TEMP_CHANGED_CALLBACK_SIGNATURE) 
 
 //#### WARNING, THE FOLLOWING METHOD CAN F--K YOUR HP UP, USE WISELY ####
 void HeatPump::sendCustomPacket(byte data[], int packetLength) {
-  while(!canSend(false)) { delay(10); }
+  while(!canSend()) { delay(10); }
 
   packetLength += 2; // +2 for first header byte and checksum
   packetLength = (packetLength > PACKET_LEN) ? PACKET_LEN : packetLength; // ensure we are not exceeding PACKET_LEN
@@ -322,6 +302,7 @@ void HeatPump::sendCustomPacket(byte data[], int packetLength) {
   packet[(packetLength-1)] = chkSum;
 
   writePacket(packet, packetLength);
+  delay(1000);
 }
 
 // Private Methods //////////////////////////////////////////////////////////////
@@ -363,8 +344,8 @@ int HeatPump::lookupByteMapValue(const int valuesMap[], const byte byteMap[], in
   return valuesMap[0];
 }
 
-bool HeatPump::canSend(bool isInfo) {
-  return (millis() - (isInfo ? PACKET_INFO_INTERVAL_MS : PACKET_SENT_INTERVAL_MS)) > lastSend;
+bool HeatPump::canSend() {
+  return (millis() - PACKET_SENT_INTERVAL_MS) > lastSend;
 }  
 
 byte HeatPump::checkSum(byte bytes[], int len) {
@@ -441,7 +422,27 @@ void HeatPump::createInfoPacket(byte *packet, byte packetType) {
   byte chkSum = checkSum(packet, 21);
   packet[21] = chkSum;
 }
-
+void HeatPump::createTempPacket(byte *packet, float setting) {
+    for (int i = 0; i < HEADER_LEN; i++) {
+        packet[i] = HEADER[i];
+    }
+    packet[5] = 0x07;
+    if(setting > 0) {
+        packet[6] = 0x01;
+        setting = setting * 2;
+        setting = round(setting);
+        setting = setting / 2;
+        float temp = (setting * 2) + 128;
+        packet[8] = (int)temp;
+    }
+    else {
+        packet[6] = 0x00;
+        packet[8] = 0x80; //MHK1 send 80, even though it could be 00, since ControlByte is 00
+    }
+    // add the checksum
+    byte chkSum = checkSum(packet, 21);
+    packet[21] = chkSum;
+}
 void HeatPump::writePacket(byte *packet, int length) {
   for (int i = 0; i < length; i++) {
      _HardSerial->write((uint8_t)packet[i]);
@@ -450,7 +451,7 @@ void HeatPump::writePacket(byte *packet, int length) {
   if(packetCallback) {
     packetCallback(packet, length, (char*)"packetSent");
   }
-  delay(1000);
+
   lastSend = millis();
 }
 
@@ -519,6 +520,7 @@ int HeatPump::readPacket() {
         }
 
         if(header[1] == 0x62) {
+            waitingForAck = false;
           switch(data[0]) {
             case 0x02: { // setting information
               heatpumpSettings receivedSettings;
@@ -611,11 +613,12 @@ int HeatPump::readPacket() {
             case 0x06: { // status
               heatpumpStatus receivedStatus;
               receivedStatus.operating = data[4];
-
+                receivedStatus.coil = int(data[3]);
               // callback for status change
-              if(statusChangedCallback && currentStatus.operating != receivedStatus.operating) {
+              if(statusChangedCallback && (currentStatus.operating != receivedStatus.operating || currentStatus.coil != receivedStatus.coil)) {
                 currentStatus.operating = receivedStatus.operating;
-                statusChangedCallback(currentStatus);
+                  currentStatus.coil = receivedStatus.coil;
+                  statusChangedCallback(currentStatus);
               } else {
                 currentStatus.operating = receivedStatus.operating;
               }
@@ -623,13 +626,26 @@ int HeatPump::readPacket() {
               return RCVD_PKT_STATUS;
             }
 
-            case 0x09: { // standby mode maybe?
+              case 0x09: { // stage
+                  heatpumpStatus receivedStatus;
+                  receivedStatus.stage = data[4];
+                  
+                  // callback for status change
+                  if(statusChangedCallback && currentStatus.stage != receivedStatus.stage) {
+                      currentStatus.stage = receivedStatus.stage;
+                      statusChangedCallback(currentStatus);
+                  } else {
+                      currentStatus.stage = receivedStatus.stage;
+                  }
+                  
+                  return RCVD_PKT_STAGE;
               break;
             }
           } 
         } 
         
-        if(header[1] == 0x61) { //Last update was successful 
+        if(header[1] == 0x61) { //Last update was successful
+            waitingForAck = false;
           return RCVD_PKT_UPDATE_SUCCESS;
         } else if(header[1] == 0x7a) { //Last update was successful 
           connected = true;
@@ -641,4 +657,5 @@ int HeatPump::readPacket() {
 
   return RCVD_PKT_FAIL;
 }
+
 
