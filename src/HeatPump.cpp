@@ -88,6 +88,9 @@ bool HeatPump::connect(HardwareSerial *serial) {
   }
   connected = false;
   _HardSerial->begin(2400, SERIAL_8E1);
+  if(onConnectCallback) {
+    onConnectCallback();
+  }
   
   // settle before we start sending packets
   delay(2000);
@@ -97,20 +100,17 @@ bool HeatPump::connect(HardwareSerial *serial) {
   memcpy(packet, CONNECT, CONNECT_LEN);
   //for(int count = 0; count < 2; count++) {
   writePacket(packet, CONNECT_LEN);
-    delay(1100);
   int packetType = readPacket();
   return packetType == RCVD_PKT_CONNECT_SUCCESS;
   //}
 }
 
 bool HeatPump::update() {
-  while(!canSend()) { delay(10); }
+  while(!canSend(false)) { delay(10); }
 
   byte packet[PACKET_LEN] = {};
   createPacket(packet, wantedSettings);
   writePacket(packet, PACKET_LEN);
-
-  delay(1000);
   
   int packetType = readPacket();
   
@@ -131,7 +131,7 @@ void HeatPump::sync(byte packetType) {
   else if(autoUpdate && !firstRun && wantedSettings != currentSettings && packetType == PACKET_TYPE_DEFAULT) {
      update(); 
   }
-  else if(canSend()) {
+  else if(canSend(true)) {
     byte packet[PACKET_LEN] = {};
     createInfoPacket(packet, packetType);
     writePacket(packet, PACKET_LEN);
@@ -189,13 +189,13 @@ void HeatPump::setModeSetting(String setting) {
   wantedSettings.mode = lookupByteMapIndex(MODE_MAP, 5, setting) > -1 ? setting : MODE_MAP[0];
 }
 
-int HeatPump::getTemperature() {
+float HeatPump::getTemperature() {
   return currentSettings.temperature;
 }
 
 void HeatPump::setTemperature(float setting) {
   if(!tempMode){
-    wantedSettings.temperature = lookupByteMapIndex(TEMP_MAP, 16, setting) > -1 ? setting : TEMP_MAP[0];
+    wantedSettings.temperature = lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) > -1 ? setting : TEMP_MAP[0];
   }
   else {
     setting = setting * 2;
@@ -229,7 +229,7 @@ void HeatPump::setRemoteTemperature(float setting) {
   // add the checksum
   byte chkSum = checkSum(packet, 21);
   packet[21] = chkSum;
-  while(!canSend()) { delay(10); }
+  while(!canSend(false)) { delay(10); }
   writePacket(packet, PACKET_LEN);
 }
 
@@ -273,14 +273,18 @@ bool HeatPump::getOperating() {
   return currentStatus.operating;
 }
 
-unsigned int HeatPump::FahrenheitToCelsius(unsigned int tempF) {
-  double temp = (tempF - 32) / 1.8;                //round up if heat, down if cool or any other mode
-  return currentSettings.mode == MODE_MAP[0] ? ceil(temp) : floor(temp);
+float HeatPump::FahrenheitToCelsius(int tempF) {
+  float temp = (tempF - 32) / 1.8;                
+  return ((float)round(temp*2))/2;                 //Round to nearest 0.5C
 }
 
-unsigned int HeatPump::CelsiusToFahrenheit(unsigned int tempC) {
-  double temp = (tempC * 1.8) + 32;                //round up if heat, down if cool or any other mode
-  return currentSettings.mode == MODE_MAP[0] ? ceil(temp) : floor(temp);
+int HeatPump::CelsiusToFahrenheit(float tempC) {
+  float temp = (tempC * 1.8) + 32;                //round up if heat, down if cool or any other mode
+  return (int)(temp + 0.5);
+}
+
+void HeatPump::setOnConnectCallback(ON_CONNECT_CALLBACK_SIGNATURE) {
+  this->onConnectCallback = onConnectCallback;
 }
 
 void HeatPump::setSettingsChangedCallback(SETTINGS_CHANGED_CALLBACK_SIGNATURE) {
@@ -301,7 +305,7 @@ void HeatPump::setRoomTempChangedCallback(ROOM_TEMP_CHANGED_CALLBACK_SIGNATURE) 
 
 //#### WARNING, THE FOLLOWING METHOD CAN F--K YOUR HP UP, USE WISELY ####
 void HeatPump::sendCustomPacket(byte data[], int packetLength) {
-  while(!canSend()) { delay(10); }
+  while(!canSend(false)) { delay(10); }
 
   packetLength += 2; // +2 for first header byte and checksum
   packetLength = (packetLength > PACKET_LEN) ? PACKET_LEN : packetLength; // ensure we are not exceeding PACKET_LEN
@@ -318,7 +322,6 @@ void HeatPump::sendCustomPacket(byte data[], int packetLength) {
   packet[(packetLength-1)] = chkSum;
 
   writePacket(packet, packetLength);
-  delay(1000);
 }
 
 // Private Methods //////////////////////////////////////////////////////////////
@@ -360,8 +363,8 @@ int HeatPump::lookupByteMapValue(const int valuesMap[], const byte byteMap[], in
   return valuesMap[0];
 }
 
-bool HeatPump::canSend() {
-  return (millis() - PACKET_SENT_INTERVAL_MS) > lastSend;
+bool HeatPump::canSend(bool isInfo) {
+  return (millis() - (isInfo ? PACKET_INFO_INTERVAL_MS : PACKET_SENT_INTERVAL_MS)) > lastSend;
 }  
 
 byte HeatPump::checkSum(byte bytes[], int len) {
@@ -447,7 +450,7 @@ void HeatPump::writePacket(byte *packet, int length) {
   if(packetCallback) {
     packetCallback(packet, length, (char*)"packetSent");
   }
-
+  delay(1000);
   lastSend = millis();
 }
 
@@ -638,5 +641,4 @@ int HeatPump::readPacket() {
 
   return RCVD_PKT_FAIL;
 }
-
 
